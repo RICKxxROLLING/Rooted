@@ -1,0 +1,9 @@
+services:
+  garden-tracker:
+    build: .
+    ports:
+      - "3000:80"      # Access at http://localhost:3000 (or your server IP:3000)
+    restart: unless-stopped
+    # Uncomment to run multiple replicas behind a load balancer:
+    # deploy:
+    #   replicas: 3
