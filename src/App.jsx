@@ -2879,12 +2879,6 @@ export default function App() {
     return () => root.removeAttribute("data-dark");
   }, [darkMode]);
 
-  // ── Persist all user data to localStorage on every change ─────────────────
-  useEffect(() => { try { localStorage.setItem("gt-plants",      JSON.stringify(plants));      } catch {} }, [plants]);
-  useEffect(() => { try { localStorage.setItem("gt-fertilizers", JSON.stringify(fertilizers)); } catch {} }, [fertilizers]);
-  useEffect(() => { try { localStorage.setItem("gt-planterboxes",JSON.stringify(planterBoxes));} catch {} }, [planterBoxes]);
-  useEffect(() => { try { localStorage.setItem("gt-darkmode",    String(darkMode));             } catch {} }, [darkMode]);
-  useEffect(() => { try { localStorage.setItem("gt-celebrated",  JSON.stringify([...celebrated])); } catch {} }, [celebrated]);
   // Animation state
   const [toasts, setToasts]           = useState([]);
   const [confettiOn, setConfettiOn]   = useState(false);
@@ -2927,6 +2921,13 @@ export default function App() {
   const [selectedBoxId, setSelectedBoxId] = useState(null);
   const [showCreatePlanter, setShowCreatePlanter] = useState(false);
   const [plannerView, setPlannerView] = useState("list"); // list | box
+
+  // ── Persist all user data to localStorage on every change ─────────────────
+  useEffect(() => { try { localStorage.setItem("gt-plants",      JSON.stringify(plants));      } catch {} }, [plants]);
+  useEffect(() => { try { localStorage.setItem("gt-fertilizers", JSON.stringify(fertilizers)); } catch {} }, [fertilizers]);
+  useEffect(() => { try { localStorage.setItem("gt-planterboxes",JSON.stringify(planterBoxes));} catch {} }, [planterBoxes]);
+  useEffect(() => { try { localStorage.setItem("gt-darkmode",    String(darkMode));             } catch {} }, [darkMode]);
+  useEffect(() => { try { localStorage.setItem("gt-celebrated",  JSON.stringify([...celebrated])); } catch {} }, [celebrated]);
 
   // ── Auto-watering engine: runs on mount + whenever plants change ──────────
   useEffect(() => {
