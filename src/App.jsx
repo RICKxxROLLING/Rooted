@@ -1,4 +1,3 @@
-
 import { useState, useRef, useEffect } from "react";
 
 // ── Plant database (250 plants) ─────────────────────────────────────────────
@@ -2856,10 +2855,20 @@ function BottomNav({ tab, onTabChange }) {
 // ════════════════════════════════════════════════════════════════════════════
 // ── App Root ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [plants, setPlants] = useState(INITIAL);
-  const [fertilizers, setFertilizers] = useState([]);
+  // ── Persistent state — load from localStorage, fall back to defaults ──────
+  const [plants, setPlants] = useState(() => {
+    try { const s = localStorage.getItem("gt-plants"); return s ? JSON.parse(s) : INITIAL; }
+    catch { return INITIAL; }
+  });
+  const [fertilizers, setFertilizers] = useState(() => {
+    try { const s = localStorage.getItem("gt-fertilizers"); return s ? JSON.parse(s) : []; }
+    catch { return []; }
+  });
   const [tab, setTab] = useState("garden");
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(() => {
+    try { return localStorage.getItem("gt-darkmode") === "true"; }
+    catch { return false; }
+  });
 
   // Apply dark attribute to <html> so every element on the page is covered,
   // including fixed-position modals that escape any child container.
@@ -2869,10 +2878,20 @@ export default function App() {
     else root.removeAttribute("data-dark");
     return () => root.removeAttribute("data-dark");
   }, [darkMode]);
+
+  // ── Persist all user data to localStorage on every change ─────────────────
+  useEffect(() => { try { localStorage.setItem("gt-plants",      JSON.stringify(plants));      } catch {} }, [plants]);
+  useEffect(() => { try { localStorage.setItem("gt-fertilizers", JSON.stringify(fertilizers)); } catch {} }, [fertilizers]);
+  useEffect(() => { try { localStorage.setItem("gt-planterboxes",JSON.stringify(planterBoxes));} catch {} }, [planterBoxes]);
+  useEffect(() => { try { localStorage.setItem("gt-darkmode",    String(darkMode));             } catch {} }, [darkMode]);
+  useEffect(() => { try { localStorage.setItem("gt-celebrated",  JSON.stringify([...celebrated])); } catch {} }, [celebrated]);
   // Animation state
   const [toasts, setToasts]           = useState([]);
   const [confettiOn, setConfettiOn]   = useState(false);
-  const [celebrated, setCelebrated]   = useState(new Set());
+  const [celebrated, setCelebrated]   = useState(() => {
+    try { const s = localStorage.getItem("gt-celebrated"); return s ? new Set(JSON.parse(s)) : new Set(); }
+    catch { return new Set(); }
+  });
   const toastTimers = useRef({});
 
   function pushToast(message, icon = "✅", type = "success", duration = 2800) {
@@ -2901,7 +2920,10 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
 
   // Planner state
-  const [planterBoxes, setPlanterBoxes] = useState([]);
+  const [planterBoxes, setPlanterBoxes] = useState(() => {
+    try { const s = localStorage.getItem("gt-planterboxes"); return s ? JSON.parse(s) : []; }
+    catch { return []; }
+  });
   const [selectedBoxId, setSelectedBoxId] = useState(null);
   const [showCreatePlanter, setShowCreatePlanter] = useState(false);
   const [plannerView, setPlannerView] = useState("list"); // list | box
