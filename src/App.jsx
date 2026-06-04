@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { BrowserMultiFormatReader } from "@zxing/browser";
 
 // ── Plant database (250 plants) ─────────────────────────────────────────────
 // `let` so custom-lookup plants can be registered at runtime
@@ -1681,7 +1682,10 @@ function AddFertilizerModal({ onSave, onClose }) {
   const [color, setColor] = useState(FERT_COLOURS[0]);
   const [notes, setNotes] = useState("");
   const [photo, setPhoto] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
   const fileRef = useRef();
+  const barcodeFileRef = useRef();
 
   const total = n + p + k;
   const pctN = total > 0 ? Math.round(n/total*100) : 0;
@@ -1696,6 +1700,48 @@ function AddFertilizerModal({ onSave, onClose }) {
     reader.readAsDataURL(file);
   }
 
+  async function handleBarcode(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setScanning(true);
+    setScanError("");
+    try {
+      const imgUrl = URL.createObjectURL(file);
+      const reader = new BrowserMultiFormatReader();
+      const result = await reader.decodeFromImageUrl(imgUrl);
+      URL.revokeObjectURL(imgUrl);
+      const barcode = result.getText();
+
+      const res = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${barcode}`);
+      const data = await res.json();
+      const item = data.items?.[0];
+      if (!item) throw new Error("Product not found");
+
+      if (item.title) setName(item.title);
+      if (item.brand) setBrand(item.brand);
+
+      // Try to parse NPK from title or description (e.g. "10-10-10", "5-10-5")
+      const searchText = `${item.title || ""} ${item.description || ""}`;
+      const npkMatch = searchText.match(/(\d{1,2})-(\d{1,2})-(\d{1,2})/);
+      if (npkMatch) {
+        setN(Number(npkMatch[1]));
+        setP(Number(npkMatch[2]));
+        setK(Number(npkMatch[3]));
+      }
+
+      // Guess type from title
+      const titleLower = (item.title || "").toLowerCase();
+      if (titleLower.includes("granul") || titleLower.includes("spike") || titleLower.includes("powder")) setType("Granular");
+      else if (titleLower.includes("liquid") || titleLower.includes("concentrate")) setType("Liquid");
+      else if (titleLower.includes("organic") || titleLower.includes("compost")) setType("Organic");
+
+    } catch (err) {
+      setScanError(err.message === "Product not found" ? "Product not found in database." : "Couldn't read barcode — try a clearer photo.");
+    } finally {
+      setScanning(false);
+    }
+  }
+
   function handleSave() {
     if (!name.trim()) return;
     onSave({ id: randomId(), name: name.trim(), brand: brand.trim(), type, npk: { n, p, k }, color, notes, photo, added: new Date().toISOString() });
@@ -1708,19 +1754,31 @@ function AddFertilizerModal({ onSave, onClose }) {
         <div className="p-4 space-y-4 pb-8">
           <h2 className="font-bold text-gray-800 text-lg">Add Fertilizer</h2>
 
-          {/* Photo scan */}
+          {/* Photo + barcode scan */}
           <div className="flex gap-3">
-            <div
-              onClick={() => fileRef.current.click()}
-              className={`w-20 h-20 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 transition-colors flex-shrink-0 ${photo ? "border-green-400" : "border-gray-300"}`}
-            >
-              {photo ? <img src={photo} className="w-full h-full object-cover rounded-xl" alt="" /> : <>
-                <span className="text-2xl">📷</span>
-                <span className="text-xs text-gray-400 mt-0.5">Scan label</span>
-              </>}
-              <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handlePhoto} />
+            <div className="flex flex-col gap-2 flex-shrink-0">
+              <div
+                onClick={() => fileRef.current.click()}
+                className={`w-20 h-20 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer hover:bg-gray-50 transition-colors ${photo ? "border-green-400" : "border-gray-300"}`}
+              >
+                {photo ? <img src={photo} className="w-full h-full object-cover rounded-xl" alt="" /> : <>
+                  <span className="text-2xl">📷</span>
+                  <span className="text-xs text-gray-400 mt-0.5">Photo</span>
+                </>}
+                <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handlePhoto} />
+              </div>
+              <button
+                onClick={() => barcodeFileRef.current.click()}
+                disabled={scanning}
+                className="w-20 h-8 rounded-lg border-2 border-dashed border-blue-300 flex items-center justify-center gap-1 text-xs text-blue-500 hover:bg-blue-50 disabled:opacity-50 transition-colors"
+              >
+                {scanning ? <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" /> : "▮▮▮"}
+                <span>{scanning ? "" : "Barcode"}</span>
+              </button>
+              <input ref={barcodeFileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleBarcode} />
             </div>
             <div className="flex-1 space-y-2">
+              {scanError && <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-2 py-1">{scanError}</p>}
               <input value={name} onChange={e => setName(e.target.value)} placeholder="Fertilizer name *"
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400" />
               <input value={brand} onChange={e => setBrand(e.target.value)} placeholder="Brand (optional)"
