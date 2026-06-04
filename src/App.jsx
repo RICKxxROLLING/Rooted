@@ -713,12 +713,58 @@ function AddPlant({ onSave, onCancel }) {
   );
   const noResults = search.trim().length > 1 && filtered.length === 0;
 
-  function handlePhoto(e) {
+  const [identifyError, setIdentifyError] = useState("");
+
+  async function handlePhoto(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = ev => { setPhoto(ev.target.result); setStep("select"); };
+    reader.onload = ev => setPhoto(ev.target.result);
     reader.readAsDataURL(file);
+
+    setStep("identifying");
+    setIdentifyError("");
+    try {
+      const form = new FormData();
+      form.append("images", file);
+      form.append("organs", "auto");
+      const res = await fetch(
+        "https://my-api.plantnet.org/v2/identify/all?api-key=2b10qqEpq1xFkdppuyb37UybO&lang=en&nb-results=5",
+        { method: "POST", body: form }
+      );
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      const results = data.results || [];
+      // Try to match top candidates against PLANT_DB by common or scientific name
+      let matched = null;
+      for (const r of results) {
+        const commonNames = (r.species?.commonNames || []).map(n => n.toLowerCase());
+        const sciName = (r.species?.scientificNameWithoutAuthor || "").toLowerCase();
+        const allNames = [sciName, ...commonNames];
+        for (const [id, p] of Object.entries(PLANT_DB)) {
+          const dbName = p.name.toLowerCase();
+          if (allNames.some(n => n.includes(dbName) || dbName.includes(n.split(" ")[0]))) {
+            matched = id;
+            break;
+          }
+        }
+        if (matched) break;
+      }
+      if (matched) {
+        setSelectedId(matched);
+        setNickname(PLANT_DB[matched].name);
+        setStep("details");
+      } else {
+        // Pre-fill search with top common name so user can pick manually
+        const topCommon = results[0]?.species?.commonNames?.[0] ||
+          results[0]?.species?.scientificNameWithoutAuthor || "";
+        setSearch(topCommon);
+        setStep("select");
+      }
+    } catch {
+      setIdentifyError("Couldn't identify — pick manually.");
+      setStep("select");
+    }
   }
 
   async function handleLookup() {
@@ -769,6 +815,18 @@ function AddPlant({ onSave, onCancel }) {
     });
   }
 
+  // ── Step: identifying ──
+  if (step === "identifying") return (
+    <div className="p-4 flex flex-col items-center justify-center gap-4 min-h-[300px]">
+      {photo && <img src={photo} className="w-40 h-40 rounded-2xl object-cover shadow" alt="plant" />}
+      <div className="flex flex-col items-center gap-2">
+        <div className="w-8 h-8 border-4 border-green-500 border-t-transparent rounded-full animate-spin" />
+        <p className="font-semibold text-gray-700">Identifying your plant…</p>
+        <p className="text-sm text-gray-400">Powered by Pl@ntNet</p>
+      </div>
+    </div>
+  );
+
   // ── Step: scan ──
   if (step === "scan") return (
     <div className="p-4 space-y-4">
@@ -805,6 +863,9 @@ function AddPlant({ onSave, onCancel }) {
         </div>
       )}
       <h2 className="font-bold text-gray-800">Select plant type</h2>
+      {identifyError && (
+        <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">{identifyError}</p>
+      )}
       <input
         value={search} onChange={e => setSearch(e.target.value)}
         placeholder="Search 250+ plants…"
