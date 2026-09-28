@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 
 // ── Plant database (250 plants) ─────────────────────────────────────────────
-// `let` so custom-lookup plants can be registered at runtime
-let PLANT_DB = {
+// Custom-lookup plants are added at runtime (see registerCustomPlant)
+const PLANT_DB = {
   tomato: {
     name: "Tomato", emoji: "🍅", category: "Vegetable",
     spacingCells: 2, // 60 cm / 24 in
@@ -283,8 +283,19 @@ function matchPlantNetResults(results) {
 
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+// Whole calendar days from a to b (local time; round() absorbs DST shifts)
 function daysBetween(a, b) {
-  return Math.floor((b - a) / 86400000);
+  return Math.round((startOfDay(b) - startOfDay(a)) / 86400000);
+}
+// "YYYY-MM-DD" for <input type="date"> in local time (toISOString would give the UTC date)
+function toDateInput(d) {
+  const x = new Date(d);
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
 }
 function addDays(date, n) {
   const d = new Date(date);
@@ -314,7 +325,7 @@ function stageProgress(plant, daysSincePlanting) {
   return 100;
 }
 function overallProgress(plant, daysSincePlanting) {
-  return Math.min(100, Math.round((daysSincePlanting / plant.daysToHarvest) * 100));
+  return Math.max(0, Math.min(100, Math.round((daysSincePlanting / plant.daysToHarvest) * 100)));
 }
 function urgency(daysAgo, interval) {
   if (daysAgo >= interval) return "overdue";
@@ -605,27 +616,6 @@ function ProgressBar({ pct, colour = "bg-green-500" }) {
   );
 }
 
-// ── Header ───────────────────────────────────────────────────────────────────
-function Header({ view, onBack, onAdd }) {
-  return (
-    <header className="bg-gradient-to-r from-green-700 to-emerald-600 text-white px-4 py-3 flex items-center gap-3 shadow-md">
-      {view !== "dashboard" && (
-        <button onClick={onBack} className="text-white/80 hover:text-white text-xl leading-none">←</button>
-      )}
-      <span className="text-2xl">🌱</span>
-      <h1 className="font-bold text-lg flex-1">Garden Tracker</h1>
-      {view === "dashboard" && (
-        <button
-          onClick={onAdd}
-          className="bg-white/20 hover:bg-white/30 text-white text-sm font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1"
-        >
-          <span className="text-base leading-none">+</span> Add Plant
-        </button>
-      )}
-    </header>
-  );
-}
-
 // ── Dashboard ────────────────────────────────────────────────────────────────
 function Dashboard({ plants, onSelect, onAdd }) {
   const today = new Date();
@@ -764,7 +754,7 @@ function AddPlant({ onSave, onCancel }) {
   const [step, setStep] = useState("scan");
   const [selectedId, setSelectedId] = useState(null);
   const [nickname, setNickname] = useState("");
-  const [plantedDate, setPlantedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [plantedDate, setPlantedDate] = useState(() => toDateInput(new Date()));
   const [notes, setNotes] = useState("");
   const [photo, setPhoto] = useState(null);
   const [search, setSearch] = useState("");
@@ -860,9 +850,10 @@ function AddPlant({ onSave, onCancel }) {
       id: randomId(),
       plantId: selectedId,
       nickname: nickname.trim(),
-      plantedDate: new Date(plantedDate).toISOString(),
+      // Parse as local midnight — new Date("YYYY-MM-DD") is UTC and can land on the previous day
+      plantedDate: new Date(`${plantedDate}T00:00`).toISOString(),
       lastWatered: new Date().toISOString(),
-      lastFed: new Date(new Date().setDate(new Date().getDate() - 7)).toISOString(),
+      lastFed: addDays(new Date(), -7).toISOString(),
       photo,
       notes,
       logs: [{ date: new Date().toISOString(), text: "Added to garden tracker." }],
@@ -1373,9 +1364,9 @@ function PlantProfile({ entry, onUpdate, onDelete, fertilizers, onToast }) {
                 onApply={(fert) => {
                   const score = calcNPKScore(db.category, fert.npk);
                   const boost = npkHealthBoost(score);
-                  const newHealth = Math.min(100, (entry.health ?? 75) + boost);
+                  const newHealth = Math.min(100, health + boost);
                   logAction(
-                    `🧪 Applied ${fert.name} (N${fert.npk.n}-P${fert.npk.p}-K${fert.npk.k}). NPK match: ${score}%. Health: ${entry.health ?? 75}% → ${newHealth}%.`,
+                    `🧪 Applied ${fert.name} (N${fert.npk.n}-P${fert.npk.p}-K${fert.npk.k}). NPK match: ${score}%. Health: ${health}% → ${newHealth}%.`,
                     { lastFed: new Date().toISOString(), health: newHealth },
                     `${fert.name} applied! Health +${boost} 🧪`,
                     "🧪",
@@ -1634,8 +1625,9 @@ function ApplyFertModal({ entry, db, fertilizers, onApply, onClose }) {
   const fert = selected ? fertilizers.find(f => f.id === selected) : null;
   const score = fert ? calcNPKScore(db.category, fert.npk) : null;
   const boost = fert ? npkHealthBoost(score) : 0;
-  const newHealth = fert ? Math.min(100, (entry.health ?? 75) + boost) : null;
-  const hl = fert ? healthLabel(Math.min(100, (entry.health ?? 75) + boost)) : null;
+  const health = currentHealth(entry);
+  const newHealth = fert ? Math.min(100, health + boost) : null;
+  const hl = fert ? healthLabel(newHealth) : null;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-end z-50" onClick={onClose}>
@@ -1696,7 +1688,7 @@ function ApplyFertModal({ entry, db, fertilizers, onApply, onClose }) {
               <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mt-2">
                 <div className="font-semibold text-emerald-800 text-sm mb-1">Effect on {entry.nickname}</div>
                 <div className="flex items-center gap-3 text-sm">
-                  <span className="text-gray-500">{healthLabel(entry.health ?? 75).icon} {entry.health ?? 75}%</span>
+                  <span className="text-gray-500">{healthLabel(health).icon} {health}%</span>
                   <span className="text-gray-400">→</span>
                   <span className={`font-bold ${hl.colour}`}>{hl.icon} {newHealth}%</span>
                   <span className="text-xs text-emerald-600 font-semibold ml-auto">+{boost} health</span>
@@ -2027,34 +2019,59 @@ function NutrientsView({ fertilizers, onAdd, onDelete }) {
 // ════════════════════════════════════════════════════════════════════════════
 // ── Planner: compatibility helpers ───────────────────────────────────────────
 
+/** True if either name contains the other as whole words, ignoring plurals ("Beans" ~ "Bush Bean") */
+function namesMatch(x, y) {
+  const contains = (hay, needle) => {
+    const stem = needle.toLowerCase().trim()
+      .replace(/(s|x|z|ch|sh|o)es$/, "$1")   // tomatoes → tomato, radishes → radish
+      .replace(/([^s])s$/, "$1");            // beans → bean (but cress stays cress)
+    return stem.length > 1 && new RegExp(`\\b${escapeRegExp(stem)}(e?s)?\\b`).test(hay.toLowerCase());
+  };
+  return contains(x, y) || contains(y, x);
+}
+
 /** Returns "good" | "bad" | "neutral" for two plantIds */
 function getCompatibility(idA, idB) {
   if (!idA || !idB || idA === idB) return "neutral";
   const a = PLANT_DB[idA];
   const b = PLANT_DB[idB];
   if (!a || !b) return "neutral";
-  const aName = a.name.toLowerCase();
-  const bName = b.name.toLowerCase();
-  const aComp = (a.companions || []).map(c => c.toLowerCase());
-  const aAvoid = (a.avoid || []).map(c => c.toLowerCase());
-  const bComp = (b.companions || []).map(c => c.toLowerCase());
-  const bAvoid = (b.avoid || []).map(c => c.toLowerCase());
-  const isGood = aComp.some(c => bName.includes(c) || c.includes(bName))
-    || bComp.some(c => aName.includes(c) || c.includes(aName));
-  const isBad = aAvoid.some(c => bName.includes(c) || c.includes(bName))
-    || bAvoid.some(c => aName.includes(c) || c.includes(aName));
+  const listHas = (list, name) => (list || []).some(c => namesMatch(c, name));
+  const isGood = listHas(a.companions, b.name) || listHas(b.companions, a.name);
+  const isBad = listHas(a.avoid, b.name) || listHas(b.avoid, a.name);
   if (isBad) return "bad";
   if (isGood) return "good";
   return "neutral";
 }
 
-/** Get the 4 adjacent neighbour plantIds of cell (x,y) */
+/** Plant ids adjacent to the plant (or empty cell) at (x,y), including every
+ *  cell of a multi-cell footprint. Follows "@anchor" refs and de-duplicates. */
 function getNeighbours(cells, w, h, x, y) {
-  return [[-1,0],[1,0],[0,-1],[0,1]]
-    .map(([dx,dy]) => [x+dx, y+dy])
-    .filter(([nx,ny]) => nx >= 0 && ny >= 0 && nx < w && ny < h)
-    .map(([nx,ny]) => cells[`${nx},${ny}`])
-    .filter(Boolean);
+  const self = resolveAnchor(cells, `${x},${y}`);
+  const s = self ? getSpacingCells(PLANT_DB[cells[self]] || {}) : 1;
+  const [ax, ay] = self ? self.split(",").map(Number) : [x, y];
+  const anchors = new Set();
+  for (let i = 0; i < s; i++) {
+    for (const [nx, ny] of [[ax - 1, ay + i], [ax + s, ay + i], [ax + i, ay - 1], [ax + i, ay + s]]) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const a = resolveAnchor(cells, `${nx},${ny}`);
+      if (a && a !== self) anchors.add(a);
+    }
+  }
+  return [...anchors].map(a => cells[a]);
+}
+
+/** Unique pairs of plant ids that sit next to each other in a box */
+function adjacentPairs(box) {
+  const pairs = new Map();
+  for (const key of Object.keys(box.cells)) {
+    const [x, y] = key.split(",").map(Number);
+    for (const nKey of [`${x + 1},${y}`, `${x},${y + 1}`]) {
+      const a = resolveAnchor(box.cells, key), b = resolveAnchor(box.cells, nKey);
+      if (a && b && a !== b) pairs.set([a, b].sort().join("|"), [box.cells[a], box.cells[b]]);
+    }
+  }
+  return [...pairs.values()];
 }
 
 /** Overall compat status of a planted cell with its neighbours */
@@ -2083,9 +2100,7 @@ function scorePlantAgainstNeighbours(plantId, neighbourIds) {
 /** Return ranked suggestions for an empty cell */
 function getSuggestions(cells, w, h, x, y) {
   const nbs = getNeighbours(cells, w, h, x, y);
-  const allIds = Object.keys(PLANT_DB);
-  const placed = new Set(Object.values(cells));
-  return allIds
+  return Object.keys(PLANT_DB)
     .map(id => ({ id, score: scorePlantAgainstNeighbours(id, nbs) }))
     .sort((a, b) => b.score - a.score || PLANT_DB[a.id].name.localeCompare(PLANT_DB[b.id].name))
     .slice(0, 12);
@@ -2253,11 +2268,7 @@ function CellModal({ box, x, y, onPlant, onRemove, onClose }) {
   const [tab, setTab] = useState("suggest");
 
   // Neighbouring plantIds for the anchor cell (or target cell if empty)
-  const checkX = anchorKey ? parseInt(anchorKey.split(",")[0]) : x;
-  const checkY = anchorKey ? parseInt(anchorKey.split(",")[1]) : y;
-  const nbs = getNeighbours(box.cells, box.width, box.height, checkX, checkY)
-    .map(v => (v && v.startsWith("@")) ? box.cells[v.slice(1)] : v)
-    .filter(Boolean);
+  const nbs = getNeighbours(box.cells, box.width, box.height, x, y);
 
   const suggestions = getSuggestions(box.cells, box.width, box.height, x, y);
   const allPlants = Object.entries(PLANT_DB).map(([id, p]) => ({ id, ...p }));
@@ -2384,7 +2395,8 @@ function CellModal({ box, x, y, onPlant, onRemove, onClose }) {
                     {filtered.map(p => {
                       const s = getSpacingCells(p);
                       const fits = canPlace(box.cells, box.width, box.height, x, y, s);
-                      const compat = nbs.length > 0 ? getCompatibility(p.id, nbs[0]) : "neutral";
+                      const score = scorePlantAgainstNeighbours(p.id, nbs);
+                      const compat = score > 0 ? "good" : score < 0 ? "bad" : "neutral";
                       return (
                         <button key={p.id}
                           onClick={() => fits && onPlant(p.id)}
@@ -2447,12 +2459,10 @@ function PlanterBoxEditor({ box, onUpdate, onDelete, onBack }) {
   const anchorEntries = Object.entries(box.cells).filter(([, v]) => v && !v.startsWith("@"));
   const plantedCount = anchorEntries.length;
   let goodPairs = 0, badPairs = 0;
-  for (let i = 0; i < anchorEntries.length; i++) {
-    for (let j = i + 1; j < anchorEntries.length; j++) {
-      const c = getCompatibility(anchorEntries[i][1], anchorEntries[j][1]);
-      if (c === "good") goodPairs++;
-      if (c === "bad") badPairs++;
-    }
+  for (const [a, b] of adjacentPairs(box)) {
+    const c = getCompatibility(a, b);
+    if (c === "good") goodPairs++;
+    if (c === "bad") badPairs++;
   }
   const gridW = box.width * CELL;
   const gridH = box.height * CELL;
@@ -2627,20 +2637,9 @@ function PlannerDashboard({ boxes, onSelect, onCreate }) {
             const planted = Object.keys(box.cells).length;
             const total = box.width * box.height;
             const pct = total > 0 ? Math.round((planted / total) * 100) : 0;
-            // count conflicts
-            let conflicts = 0;
-            const keys = Object.keys(box.cells);
-            for (let i = 0; i < keys.length; i++) {
-              for (let j = i+1; j < keys.length; j++) {
-                const [ax,ay] = keys[i].split(",").map(Number);
-                const [bx,by] = keys[j].split(",").map(Number);
-                if (Math.abs(ax-bx)+Math.abs(ay-by) === 1) {
-                  if (getCompatibility(box.cells[keys[i]], box.cells[keys[j]]) === "bad") conflicts++;
-                }
-              }
-            }
-            // unique plants with emojis
-            const uniqIds = [...new Set(Object.values(box.cells))].slice(0, 6);
+            const conflicts = adjacentPairs(box).filter(([a, b]) => getCompatibility(a, b) === "bad").length;
+            // unique plants with emojis (skip "@anchor" footprint refs)
+            const uniqIds = [...new Set(Object.values(box.cells).filter(v => !v.startsWith("@")))].slice(0, 6);
             return (
               <button key={box.id} onClick={() => onSelect(box.id)}
                 className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 w-full text-left hover:shadow-md transition-shadow">
@@ -2675,199 +2674,7 @@ function PlannerDashboard({ boxes, onSelect, onCreate }) {
 // ════════════════════════════════════════════════════════════════════════════
 // ── Animation system ─────────────────────────────────────────────────────────
 
-const ANIM_CSS = `
-@keyframes ripple       { 0%{transform:scale(0);opacity:.5} 100%{transform:scale(5);opacity:0} }
-@keyframes pop          { 0%{transform:scale(1)} 40%{transform:scale(1.18)} 70%{transform:scale(.93)} 100%{transform:scale(1)} }
-@keyframes bounceIn     { 0%{transform:scale(.2);opacity:0} 55%{transform:scale(1.12)} 75%{transform:scale(.93)} 100%{transform:scale(1);opacity:1} }
-@keyframes slideUp      { from{transform:translateY(120%);opacity:0} to{transform:translateY(0);opacity:1} }
-@keyframes slideDown    { from{transform:translateY(0);opacity:1} to{transform:translateY(120%);opacity:0} }
-@keyframes fadeInDown   { from{opacity:0;transform:translateY(-16px)} to{opacity:1;transform:translateY(0)} }
-@keyframes wiggle       { 0%,100%{transform:rotate(0)} 20%{transform:rotate(-8deg)} 40%{transform:rotate(8deg)} 60%{transform:rotate(-5deg)} 80%{transform:rotate(5deg)} }
-@keyframes float        { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-7px)} }
-@keyframes shimmer      { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
-@keyframes themeSwitch  { 0%{opacity:0;transform:scale(.8) rotate(-20deg)} 100%{opacity:1;transform:scale(1) rotate(0deg)} }
-.anim-ripple      { animation: ripple .55s ease-out forwards; }
-.anim-pop         { animation: pop .3s ease-out; }
-.anim-bounceIn    { animation: bounceIn .45s cubic-bezier(.17,.67,.42,1.27) forwards; }
-.anim-slideUp     { animation: slideUp .3s cubic-bezier(.22,1,.36,1) forwards; }
-.anim-slideDown   { animation: slideDown .3s ease-in forwards; }
-.anim-fadeInDown  { animation: fadeInDown .25s ease-out; }
-.anim-wiggle      { animation: wiggle .5s ease-in-out; }
-.anim-float       { animation: float 2.4s ease-in-out infinite; }
-.anim-themeSwitch { animation: themeSwitch .3s ease-out; }
-
-/* ── Dark mode overrides ── */
-[data-dark], [data-dark] body { color-scheme: dark; background-color: #0f172a; }
-
-/* Neutral backgrounds */
-[data-dark] .bg-white        { background-color: #1e293b !important; }
-[data-dark] .bg-gray-50      { background-color: #0f172a !important; }
-[data-dark] .bg-gray-100     { background-color: #1e293b !important; }
-[data-dark] .bg-gray-200     { background-color: #334155 !important; }
-
-/* Coloured tint backgrounds — *-50 */
-[data-dark] .bg-amber-50     { background-color: #1c1107 !important; }
-[data-dark] .bg-green-50     { background-color: #052e16 !important; }
-[data-dark] .bg-blue-50      { background-color: #0c1a2e !important; }
-[data-dark] .bg-emerald-50   { background-color: #022c22 !important; }
-[data-dark] .bg-red-50       { background-color: #2d0707 !important; }
-[data-dark] .bg-yellow-50    { background-color: #1c1500 !important; }
-[data-dark] .bg-purple-50    { background-color: #1a0a2e !important; }
-[data-dark] .bg-teal-50      { background-color: #041d1a !important; }
-[data-dark] .bg-orange-50    { background-color: #1c0a00 !important; }
-[data-dark] .bg-pink-50      { background-color: #2d0a1a !important; }
-[data-dark] .bg-lime-50      { background-color: #111b00 !important; }
-[data-dark] .bg-indigo-50    { background-color: #0f0a2e !important; }
-[data-dark] .bg-sky-50       { background-color: #041828 !important; }
-[data-dark] .bg-rose-50      { background-color: #2d0514 !important; }
-[data-dark] .bg-fuchsia-50   { background-color: #2d0830 !important; }
-[data-dark] .bg-cyan-50      { background-color: #041d28 !important; }
-[data-dark] .bg-violet-50    { background-color: #130a2e !important; }
-
-/* Coloured badge backgrounds — *-100 */
-[data-dark] .bg-amber-100    { background-color: #291f00 !important; }
-[data-dark] .bg-green-100    { background-color: #14532d !important; }
-[data-dark] .bg-blue-100     { background-color: #1e3a5f !important; }
-[data-dark] .bg-emerald-100  { background-color: #064e3b !important; }
-[data-dark] .bg-red-100      { background-color: #450a0a !important; }
-[data-dark] .bg-yellow-100   { background-color: #292000 !important; }
-[data-dark] .bg-orange-100   { background-color: #431407 !important; }
-[data-dark] .bg-purple-100   { background-color: #2e1065 !important; }
-[data-dark] .bg-teal-100     { background-color: #042f2e !important; }
-[data-dark] .bg-cyan-100     { background-color: #083344 !important; }
-[data-dark] .bg-pink-100     { background-color: #500724 !important; }
-[data-dark] .bg-rose-100     { background-color: #4c0519 !important; }
-[data-dark] .bg-lime-100     { background-color: #1a2e05 !important; }
-[data-dark] .bg-violet-100   { background-color: #2e1065 !important; }
-[data-dark] .bg-fuchsia-100  { background-color: #4a044e !important; }
-[data-dark] .bg-indigo-100   { background-color: #1e1b4b !important; }
-[data-dark] .bg-sky-100      { background-color: #082f49 !important; }
-
-/* Neutral text */
-[data-dark] .text-gray-800   { color: #f1f5f9 !important; }
-[data-dark] .text-gray-700   { color: #e2e8f0 !important; }
-[data-dark] .text-gray-600   { color: #cbd5e1 !important; }
-[data-dark] .text-gray-500   { color: #94a3b8 !important; }
-[data-dark] .text-gray-400   { color: #64748b !important; }
-[data-dark] .text-gray-300   { color: #475569 !important; }
-[data-dark] .text-white      { color: #ffffff !important; }
-
-/* Coloured text — lighten dark shades so they're readable on dark backgrounds */
-[data-dark] .text-green-600  { color: #86efac !important; }
-[data-dark] .text-green-700  { color: #86efac !important; }
-[data-dark] .text-green-800  { color: #4ade80 !important; }
-[data-dark] .text-emerald-600{ color: #6ee7b7 !important; }
-[data-dark] .text-emerald-700{ color: #34d399 !important; }
-[data-dark] .text-emerald-800{ color: #10b981 !important; }
-[data-dark] .text-teal-700   { color: #5eead4 !important; }
-[data-dark] .text-blue-500   { color: #93c5fd !important; }
-[data-dark] .text-blue-600   { color: #93c5fd !important; }
-[data-dark] .text-blue-700   { color: #93c5fd !important; }
-[data-dark] .text-blue-800   { color: #60a5fa !important; }
-[data-dark] .text-indigo-700 { color: #a5b4fc !important; }
-[data-dark] .text-violet-700 { color: #c4b5fd !important; }
-[data-dark] .text-purple-600 { color: #d8b4fe !important; }
-[data-dark] .text-purple-700 { color: #c4b5fd !important; }
-[data-dark] .text-fuchsia-700{ color: #f0abfc !important; }
-[data-dark] .text-pink-700   { color: #f9a8d4 !important; }
-[data-dark] .text-rose-700   { color: #fda4af !important; }
-[data-dark] .text-red-500    { color: #fca5a5 !important; }
-[data-dark] .text-red-600    { color: #f87171 !important; }
-[data-dark] .text-red-700    { color: #f87171 !important; }
-[data-dark] .text-orange-500 { color: #fdba74 !important; }
-[data-dark] .text-orange-600 { color: #fb923c !important; }
-[data-dark] .text-orange-700 { color: #fdba74 !important; }
-[data-dark] .text-amber-600  { color: #fcd34d !important; }
-[data-dark] .text-amber-700  { color: #fcd34d !important; }
-[data-dark] .text-amber-800  { color: #fbbf24 !important; }
-[data-dark] .text-yellow-600 { color: #fde047 !important; }
-[data-dark] .text-yellow-700 { color: #facc15 !important; }
-[data-dark] .text-lime-700   { color: #bef264 !important; }
-[data-dark] .text-cyan-700   { color: #67e8f9 !important; }
-[data-dark] .text-sky-700    { color: #7dd3fc !important; }
-
-/* Borders */
-[data-dark] .border-gray-100 { border-color: #334155 !important; }
-[data-dark] .border-gray-200 { border-color: #475569 !important; }
-[data-dark] .border-gray-300 { border-color: #64748b !important; }
-[data-dark] .border-dashed   { border-color: #475569 !important; }
-[data-dark] .border-amber-200{ border-color: #44330a !important; }
-[data-dark] .border-amber-300{ border-color: #664d0f !important; }
-[data-dark] .border-green-200{ border-color: #14532d !important; }
-[data-dark] .border-green-300{ border-color: #166534 !important; }
-[data-dark] .border-blue-200 { border-color: #1e3a5f !important; }
-[data-dark] .border-blue-300 { border-color: #1d4ed8 !important; }
-[data-dark] .border-red-200  { border-color: #7f1d1d !important; }
-[data-dark] .border-red-300  { border-color: #991b1b !important; }
-[data-dark] .border-emerald-200{ border-color: #064e3b !important; }
-[data-dark] .border-emerald-300{ border-color: #065f46 !important; }
-[data-dark] .border-purple-200{ border-color: #3b0764 !important; }
-
-/* Shadows */
-[data-dark] .shadow-sm  { box-shadow: 0 1px 3px rgba(0,0,0,.6) !important; }
-[data-dark] .shadow-md  { box-shadow: 0 4px 12px rgba(0,0,0,.6) !important; }
-[data-dark] .shadow-lg  { box-shadow: 0 8px 24px rgba(0,0,0,.7) !important; }
-
-/* Inputs */
-[data-dark] input, [data-dark] textarea, [data-dark] select {
-  background-color: #334155 !important;
-  color: #f1f5f9 !important;
-  border-color: #475569 !important;
-}
-[data-dark] input::placeholder, [data-dark] textarea::placeholder { color: #64748b !important; }
-[data-dark] nav  { background-color: #1e293b !important; border-color: #334155 !important; }
-[data-dark] input[type=range] { accent-color: #34d399; }
-
-/* ── Responsive / mobile tweaks ── */
-
-/* On very narrow phones (< 380px) compress padding and font sizes */
-@media (max-width: 380px) {
-  .resp-p   { padding: 0.75rem !important; }
-  .resp-px  { padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
-  .resp-gap { gap: 0.5rem !important; }
-}
-
-/* Two-column plant grid on narrow screens; stays 3-col on wider */
-.plant-pick-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem;
-}
-@media (max-width: 340px) {
-  .plant-pick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-/* Bottom nav — shrink labels on very small screens */
-@media (max-width: 360px) {
-  .bottom-nav-label { font-size: 9px !important; }
-}
-
-/* Ensure long text never blows out card widths */
-.line-clamp-1 {
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* Make sure modals don't exceed the viewport height */
-.modal-sheet {
-  max-height: calc(100dvh - 48px);
-  overflow-y: auto;
-}
-
-/* Fluid emoji sizing in plant hero */
-@media (max-width: 360px) {
-  .hero-emoji { font-size: 3rem !important; }
-}
-`;
-
-// Inject / refresh animations — always overwrite so updates take effect
-if (typeof document !== "undefined") {
-  let el = document.getElementById("gt-animations");
-  if (!el) { el = document.createElement("style"); el.id = "gt-animations"; document.head.appendChild(el); }
-  el.textContent = ANIM_CSS;
-}
+// Keyframes, dark-mode overrides and responsive tweaks live in src/index.css
 
 // ── RippleBtn ─────────────────────────────────────────────────────────────────
 function RippleBtn({ children, className = "", onClick, disabled, style, type }) {
@@ -3102,7 +2909,7 @@ export default function App() {
   useEffect(() => saveJSON("gt-darkmode",     darkMode),        [darkMode]);
   useEffect(() => saveJSON("gt-celebrated",   [...celebrated]), [celebrated]);
 
-  // ── Auto-watering engine: runs on mount + whenever plants change ──────────
+  // ── Auto-watering engine: catches up missed sprinkler cycles on load ─────
   useEffect(() => {
     const today = new Date();
     setPlants(prev => prev.map(plant => {
