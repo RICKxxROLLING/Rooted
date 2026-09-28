@@ -369,6 +369,8 @@ function guessEmoji(name) {
 function guessCategory(name, description = "") {
   const t = (name + " " + description).toLowerCase();
   if (/herb|mint|basil|thyme|sage|rosemary|oregano|parsley|chive|dill|coriander/.test(t)) return "Herb";
+  // Checked before fruit trees so e.g. "cherry tomato" isn't a Tree Fruit
+  if (/tomato|pepper|chilli|cucumber|squash|zucchini|courgette|pumpkin|eggplant|aubergine|okra/.test(t)) return "Vegetable";
   if (/rose|tulip|daisy|marigold|zinnia|cosmos|pansy|petunia|sunflower|dahlia|lily|iris|peony|lavender/.test(t)) return "Flower/Perennial";
   if (/lettuce|spinach|kale|chard|rocket|arugula|bok choy|pak choi|endive|watercress/.test(t)) return "Leafy Green";
   if (/carrot|parsnip|beetroot|beet|radish|turnip|potato|sweet potato|yam/.test(t)) return "Root Vegetable";
@@ -399,52 +401,93 @@ function buildStagesFromDays(days) {
   ];
 }
 
-function mapOpenFarmToPlant(name, attrs) {
-  const days = attrs.days_to_maturity
-    ? parseInt(attrs.days_to_maturity, 10)
-    : attrs.growing_degree_days
-    ? 90
-    : 90;
-  const sunRaw = (attrs.sun_requirements || "Full Sun").trim();
-  const sunMap = {
-    "Full Sun": "Full Sun",
-    "Partial Sun/Shade": "Partial Sun",
-    "Partial shade": "Partial Sun",
-    "Full Shade": "Shade",
-  };
-  const sun = sunMap[sunRaw] || "Full Sun";
-  const desc = attrs.description || "";
+// ── Perenual plant-care lookup ────────────────────────────────────────────────
+const PERENUAL_KEY = import.meta.env.VITE_PERENUAL_KEY;
+const PERENUAL_API = "https://perenual.com/api/v2";
 
-  // Extract up to 4 sentences from description as tips
-  const sentences = desc.replace(/\n/g, " ").split(/(?<=[.!?])\s+/).filter(s => s.length > 20).slice(0, 4);
-  const tips = sentences.length >= 3
-    ? sentences
-    : [
-        `Water ${name} consistently, especially during dry spells.`,
-        `Feed with a balanced fertiliser every 2–3 weeks during the growing season.`,
-        `Ensure good air circulation to reduce disease risk.`,
-        `Harvest regularly to encourage continued production.`,
-        `Mulch around the base to retain moisture and suppress weeds.`,
-      ];
+// Free-plan responses replace premium fields with an "Upgrade Plans…" string
+const perenualValue = v =>
+  (typeof v === "string" && /upgrade|subscription/i.test(v)) ? null : v;
+const perenualList = v => Array.isArray(v) ? v.map(perenualValue).filter(Boolean) : [];
+const titleCase = s => s.replace(/\b\w/g, ch => ch.toUpperCase());
 
-  const category = guessCategory(name, desc);
+async function perenualFetch(path, params = {}) {
+  const qs = new URLSearchParams({ key: PERENUAL_KEY, ...params });
+  const res = await fetch(`${PERENUAL_API}/${path}?${qs}`, { signal: AbortSignal.timeout(8000) });
+  if (res.status === 429) throw new Error("Daily Perenual lookup limit reached — try again tomorrow.");
+  if (!res.ok) throw new Error("Perenual lookup failed (HTTP " + res.status + ").");
+  return res.json();
+}
 
+function mapPerenualToPlant(query, d) {
+  const name = titleCase(perenualValue(d.common_name) || query);
+  const cycle = (perenualValue(d.cycle) || "").toLowerCase();
+  const type = (perenualValue(d.type) || "").toLowerCase();
+  const desc = perenualValue(d.description) || "";
+
+  // Watering: prefer the numeric benchmark ("5-7" days), else the qualitative level
+  const bench = String(perenualValue(d.watering_general_benchmark?.value) ?? "").match(/\d+/);
+  const wateringLevel = (perenualValue(d.watering) || "").toLowerCase();
+  const waterDays = Math.min(14, Math.max(1, bench ? Number(bench[0])
+    : { frequent: 2, average: 4, minimum: 7, none: 14 }[wateringLevel] || 3));
+
+  const sunlight = perenualList(d.sunlight).map(x => x.toLowerCase());
+  const sunNeeds = sunlight.some(x => x.includes("full sun")) ? "Full Sun"
+    : sunlight.some(x => x.includes("part")) ? "Partial Sun"
+    : sunlight.some(x => x.includes("shade")) ? "Shade" : "Full Sun";
+
+  let category = guessCategory(name, `${type} ${desc}`);
+  if (category === "Vegetable") {
+    if (/tree/.test(type)) category = d.edible_fruit ? "Tree Fruit" : "Shrub";
+    else if (/shrub|bush/.test(type)) category = "Shrub";
+    else if (d.flowers && !d.edible_fruit && !d.edible_leaf) category = cycle.includes("annual") ? "Flower/Annual" : "Flower/Perennial";
+  }
+
+  // Perenual has no days-to-maturity, so estimate from the life cycle
+  const daysToHarvest = cycle.includes("annual") ? 90 : cycle.includes("biennial") ? 180 : cycle ? 365 : 90;
+
+  const soil = perenualList(d.soil);
+  const pests = perenualList(d.pest_susceptibility);
+  const pruning = perenualList(d.pruning_month);
+  const tips = [
+    `Water about every ${waterDays} day${waterDays > 1 ? "s" : ""}${wateringLevel ? ` (${wateringLevel} watering)` : ""}.`,
+    sunlight.length && `Prefers ${sunlight.join(", ")}.`,
+    soil.length && `Grows best in ${soil.join(", ").toLowerCase()} soil.`,
+    pests.length && `Watch for ${pests.join(", ").toLowerCase()}.`,
+    pruning.length && `Prune in ${pruning.join(", ")}.`,
+    d.poisonous_to_pets === true && "⚠️ Poisonous to pets — keep out of reach.",
+    d.drought_tolerant === true && "Drought tolerant once established — avoid overwatering.",
+  ].filter(Boolean);
+  const generic = [
+    `Feed with a balanced fertiliser every 2–3 weeks during the growing season.`,
+    `Mulch around the base to retain moisture and suppress weeds.`,
+    `Ensure good air circulation to reduce disease risk.`,
+  ];
+  for (const g of generic) if (tips.length < 3) tips.push(g);
+
+  const harvestSeason = perenualValue(d.harvest_season);
+  const harvestMethod = perenualValue(d.harvest_method);
   return {
-    name: attrs.name || name,
+    name,
     emoji: guessEmoji(name),
     category,
-    daysToHarvest: isNaN(days) ? 90 : days,
-    waterDays: sun === "Shade" ? 3 : 2,
-    sunNeeds: sun,
-    stages: buildStagesFromDays(isNaN(days) ? 90 : days),
+    daysToHarvest,
+    waterDays,
+    sunNeeds,
+    stages: buildStagesFromDays(daysToHarvest),
     tips: tips.slice(0, 5),
-    harvest: attrs.sowing_method
-      ? `Sowing method: ${attrs.sowing_method}. Harvest when the plant reaches maturity around day ${days}.`
-      : `Harvest when the plant reaches its mature size and colour around day ${isNaN(days) ? 90 : days}.`,
+    harvest: harvestSeason
+      ? `Harvest in ${harvestSeason.toLowerCase()}${harvestMethod ? ` by ${harvestMethod.toLowerCase()}` : ""}.`
+      : `Harvest when the plant reaches its mature size and colour.`,
     companions: ["Marigold", "Comfrey"],
     avoid: ["Fennel"],
-    source: "OpenFarm",
+    source: "perenual",
   };
+}
+
+/** Care data for one Perenual species id */
+async function fetchPerenualPlant(query, id) {
+  return mapPerenualToPlant(query, await perenualFetch(`species/details/${id}`));
 }
 
 function buildFallbackPlant(name) {
@@ -472,30 +515,19 @@ function buildFallbackPlant(name) {
   };
 }
 
+/** Search Perenual; returns { plant, source, options, reason? } and never throws */
 async function fetchCustomPlantData(name) {
   const trimmed = name.trim();
-  if (!trimmed) throw new Error("No name");
+  const fallback = reason => ({ plant: buildFallbackPlant(trimmed), source: "fallback", options: [], reason });
+  if (!PERENUAL_KEY) return fallback("Online search isn't set up (missing Perenual API key).");
   try {
-    const url = `https://openfarm.cc/api/v1/crops?q=${encodeURIComponent(trimmed)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const json = await res.json();
-    const results = json.data || [];
-    if (results.length === 0) return { plant: buildFallbackPlant(trimmed), source: "fallback", options: [] };
-    // Return best match plus alternatives
-    const options = results.slice(0, 4).map(r => ({
-      id: r.id,
-      name: r.attributes.name,
-      description: (r.attributes.description || "").slice(0, 100),
-      attrs: r.attributes,
-    }));
-    return {
-      plant: mapOpenFarmToPlant(trimmed, results[0].attributes),
-      source: "openfarm",
-      options,
-    };
+    const { data = [] } = await perenualFetch("species-list", { q: trimmed });
+    if (data.length === 0) return fallback(`No results for "${trimmed}" on Perenual.`);
+    const options = data.slice(0, 4).map(r => ({ id: r.id, name: titleCase(r.common_name || "") }));
+    return { plant: await fetchPerenualPlant(trimmed, data[0].id), source: "perenual", options };
   } catch (err) {
-    return { plant: buildFallbackPlant(trimmed), source: "fallback", options: [] };
+    return fallback(err.name === "TimeoutError" || err instanceof TypeError
+      ? "Couldn't reach Perenual." : err.message);
   }
 }
 
@@ -815,25 +847,25 @@ function AddPlant({ onSave, onCancel }) {
     if (!customQuery.trim()) return;
     setStep("loading");
     setLookupError("");
-    try {
-      const result = await fetchCustomPlantData(customQuery);
-      setLookupResult(result);
-      setLookupOptions(result.options || []);
-      setNickname(result.plant.name);
-      setStep("review");
-    } catch {
-      setLookupError("Something went wrong. Using smart defaults instead.");
-      const fallback = buildFallbackPlant(customQuery);
-      setLookupResult({ plant: fallback, source: "fallback", options: [] });
-      setNickname(fallback.name);
-      setStep("review");
-    }
+    const result = await fetchCustomPlantData(customQuery);
+    setLookupResult(result);
+    setLookupOptions(result.options || []);
+    setLookupError(result.reason || "");
+    setNickname(result.plant.name);
+    setStep("review");
   }
 
-  function selectLookupOption(attrs) {
-    const plant = mapOpenFarmToPlant(customQuery, attrs);
-    setLookupResult(prev => ({ ...prev, plant }));
-    setNickname(plant.name);
+  async function selectLookupOption(id) {
+    setStep("loading");
+    try {
+      const plant = await fetchPerenualPlant(customQuery, id);
+      setLookupResult(prev => ({ ...prev, plant }));
+      setNickname(plant.name);
+      setLookupError("");
+    } catch (err) {
+      setLookupError(err.message || "Couldn't load that plant.");
+    }
+    setStep("review");
   }
 
   function confirmCustomPlant() {
@@ -952,7 +984,7 @@ function AddPlant({ onSave, onCancel }) {
         <span className="text-3xl">🔍</span>
         <h2 className="font-bold text-gray-800 text-lg">Search any plant</h2>
       </div>
-      <p className="text-sm text-gray-500">Enter the plant's name and we'll fetch its care info from the OpenFarm crop database.</p>
+      <p className="text-sm text-gray-500">Enter the plant's name and we'll fetch its care info from the Perenual plant database.</p>
       <input
         value={customQuery}
         onChange={e => setCustomQuery(e.target.value)}
@@ -979,7 +1011,7 @@ function AddPlant({ onSave, onCancel }) {
     <div className="p-8 flex flex-col items-center justify-center gap-4 min-h-64">
       <div className="text-5xl animate-bounce">🌱</div>
       <p className="font-semibold text-gray-700">Looking up "{customQuery}"…</p>
-      <p className="text-sm text-gray-400 text-center">Fetching care data from OpenFarm crop database</p>
+      <p className="text-sm text-gray-400 text-center">Fetching care data from Perenual</p>
       <div className="flex gap-1 mt-2">
         {[0,1,2].map(i => (
           <div key={i} className="w-2 h-2 bg-green-500 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
@@ -994,9 +1026,9 @@ function AddPlant({ onSave, onCancel }) {
     return (
       <div className="p-4 space-y-4">
         <div className="flex items-center gap-2">
-          <span className="text-2xl">{lookupResult.source === "openfarm" ? "✅" : "🤖"}</span>
+          <span className="text-2xl">{lookupResult.source === "perenual" ? "✅" : "🤖"}</span>
           <h2 className="font-bold text-gray-800">
-            {lookupResult.source === "openfarm" ? "Found on OpenFarm" : "Smart defaults generated"}
+            {lookupResult.source === "perenual" ? "Found on Perenual" : "Smart defaults generated"}
           </h2>
         </div>
 
@@ -1012,7 +1044,7 @@ function AddPlant({ onSave, onCancel }) {
               {lookupOptions.map((opt, i) => (
                 <button
                   key={opt.id}
-                  onClick={() => selectLookupOption(opt.attrs)}
+                  onClick={() => selectLookupOption(opt.id)}
                   className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${p.name === opt.name ? "bg-green-600 text-white border-green-600" : "bg-white border-gray-300 text-gray-600 hover:border-green-400"}`}
                 >
                   {opt.name}
@@ -1050,11 +1082,11 @@ function AddPlant({ onSave, onCancel }) {
               <div key={i} className="text-xs text-gray-600 bg-white rounded-lg p-2">💡 {t}</div>
             ))}
           </div>
-          {lookupResult.source === "openfarm" && (
-            <p className="text-xs text-green-600 mt-2">Source: OpenFarm crop database</p>
+          {lookupResult.source === "perenual" && (
+            <p className="text-xs text-green-600 mt-2">Source: Perenual plant database · care interval estimated from its data</p>
           )}
           {lookupResult.source === "fallback" && (
-            <p className="text-xs text-gray-400 mt-2">Source: Smart defaults (OpenFarm had no results)</p>
+            <p className="text-xs text-gray-400 mt-2">Source: Smart defaults (generic care info)</p>
           )}
         </div>
 
@@ -1082,7 +1114,7 @@ function AddPlant({ onSave, onCancel }) {
             <div className="font-bold text-gray-800">{db.name}</div>
             <div className="flex items-center gap-2">
               <Badge text={db.category} />
-              {db.source === "openfarm" && <span className="text-xs text-blue-500">📡 OpenFarm</span>}
+              {db.source === "perenual" && <span className="text-xs text-blue-500">📡 Perenual</span>}
               {db.source === "Generated" && <span className="text-xs text-gray-400">🤖 Auto-generated</span>}
             </div>
           </div>

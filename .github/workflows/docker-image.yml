@@ -32,4 +32,5 @@ jobs:
           push: true
           build-args: |
             VITE_PLANTNET_KEY=${{ secrets.PLANTNET_KEY }}
+            VITE_PERENUAL_KEY=${{ secrets.PERENUAL_KEY }}
           tags: ghcr.io/${{ env.OWNER }}/garden-tracker:latest

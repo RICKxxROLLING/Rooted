@@ -8,9 +8,11 @@ RUN npm ci
 
 # Copy source and build
 COPY . .
-# Pl@ntNet key is baked into the client bundle at build time
+# API keys are baked into the client bundle at build time
 ARG VITE_PLANTNET_KEY
-ENV VITE_PLANTNET_KEY=$VITE_PLANTNET_KEY
+ARG VITE_PERENUAL_KEY
+ENV VITE_PLANTNET_KEY=$VITE_PLANTNET_KEY \
+    VITE_PERENUAL_KEY=$VITE_PERENUAL_KEY
 RUN npm run build
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
