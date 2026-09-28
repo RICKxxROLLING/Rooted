@@ -9,12 +9,18 @@ URL="http://localhost:8080"
 FAILED=0
 
 docker run -d --name gt-smoke -p 8080:80 "$IMAGE" >/dev/null
-trap 'docker logs gt-smoke; docker rm -f gt-smoke >/dev/null' EXIT
+cleanup() {
+  docker logs gt-smoke 2>&1 | tail -40
+  # Surface nginx errors as annotations (readable without admin access to the logs)
+  docker logs gt-smoke 2>&1 | grep -E '\[(emerg|crit|error)\]' | head -5 | sed 's/^/::warning title=nginx::/' || true
+  docker rm -f gt-smoke >/dev/null
+}
+trap cleanup EXIT
 
 for _ in $(seq 1 20); do curl -s -o /dev/null "$URL/" && break; sleep 0.5; done
 
 pass() { echo "✅ $1"; }
-fail() { echo "❌ $1"; FAILED=1; }
+fail() { echo "❌ $1"; echo "::error title=Smoke test::$1"; FAILED=1; }
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 header() { curl -s -D - -o /dev/null "$1" | tr -d '\r' | grep -i "^$2:" || true; }
 
