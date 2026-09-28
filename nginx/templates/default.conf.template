@@ -1,0 +1,92 @@
+# Rendered by the nginx image at container start (envsubst): ${PLANTNET_KEY} and
+# ${PERENUAL_KEY} come from container environment variables, so API keys never
+# ship in the public JavaScript bundle — the browser only talks to this server.
+
+# Per-client rate limit for the API proxies (protects the free API quotas).
+# Behind a reverse proxy every request shares the proxy's IP, so this becomes a
+# site-wide limit — still fine for a personal garden app.
+limit_req_zone $binary_remote_addr zone=api:10m rate=20r/m;
+limit_req_status 429;
+
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    server_tokens off;            # don't advertise the nginx version
+    client_max_body_size 16k;     # no uploads except the Pl@ntNet photo route below
+
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # Never serve dotfiles
+    location ~ /\. {
+        deny all;
+    }
+
+    # ── API proxies ────────────────────────────────────────────────────────────
+
+    # Plant photo identification — adds the Pl@ntNet key server-side
+    location = /api/plantnet/identify {
+        limit_except POST { deny all; }
+        limit_req zone=api burst=10 nodelay;
+        client_max_body_size 20m;
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/api-proxy.conf;
+        rewrite ^ /v2/identify/all?api-key=${PLANTNET_KEY}&lang=en&nb-results=5? break;
+        proxy_set_header Host my-api.plantnet.org;
+        proxy_pass https://my-api.plantnet.org;
+    }
+
+    # Plant care search/details — only these two read-only endpoints are exposed
+    location ~ ^/api/perenual/(species-list|species/details/[0-9]+)$ {
+        limit_except GET { deny all; }
+        limit_req zone=api burst=10 nodelay;
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/api-proxy.conf;
+        # The browser's own query (?q=…) is appended after the key
+        rewrite ^/api/perenual/(.*)$ /api/v2/$1?key=${PERENUAL_KEY} break;
+        proxy_set_header Host perenual.com;
+        proxy_pass https://perenual.com;
+    }
+
+    # Barcode lookup — UPC Item DB blocks browser CORS, and only lookups are exposed
+    location = /api/upc/lookup {
+        limit_except GET { deny all; }
+        limit_req zone=api burst=10 nodelay;
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/api-proxy.conf;
+        rewrite ^ /prod/trial/lookup break;
+        proxy_set_header Host api.upcitemdb.com;
+        proxy_pass https://api.upcitemdb.com;
+    }
+
+    # Anything else under /api is not a real endpoint
+    location /api/ {
+        return 404;
+    }
+
+    # ── Static app ─────────────────────────────────────────────────────────────
+
+    # Hashed build files never change, so cache them for a year
+    location /assets/ {
+        limit_except GET { deny all; }
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    # Always revalidate the page itself so new deploys show up immediately
+    location = /index.html {
+        limit_except GET { deny all; }
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # Single-page app: unknown paths fall back to index.html
+    location / {
+        limit_except GET { deny all; }
+        include /etc/nginx/snippets/security-headers.conf;
+        try_files $uri $uri/ /index.html;
+    }
+}

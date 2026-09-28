@@ -256,7 +256,8 @@ function compressImage(file, maxDim = 800, quality = 0.75) {
 }
 
 // ── Pl@ntNet identification ──────────────────────────────────────────────────
-const PLANTNET_KEY = import.meta.env.VITE_PLANTNET_KEY;
+// Requests go through our own /api proxy, which adds the API key server-side
+// (nginx in production, vite.config.js in dev) so it never reaches the browser.
 const PLANTNET_MIN_SCORE = 0.15;
 
 const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -402,8 +403,7 @@ function buildStagesFromDays(days) {
 }
 
 // ── Perenual plant-care lookup ────────────────────────────────────────────────
-const PERENUAL_KEY = import.meta.env.VITE_PERENUAL_KEY;
-const PERENUAL_API = "https://perenual.com/api/v2";
+const PERENUAL_API = "/api/perenual"; // proxied; the server adds the key
 
 // Free-plan responses replace premium fields with an "Upgrade Plans…" string
 const perenualValue = v =>
@@ -412,9 +412,10 @@ const perenualList = v => Array.isArray(v) ? v.map(perenualValue).filter(Boolean
 const titleCase = s => s.replace(/\b\w/g, ch => ch.toUpperCase());
 
 async function perenualFetch(path, params = {}) {
-  const qs = new URLSearchParams({ key: PERENUAL_KEY, ...params });
+  const qs = new URLSearchParams(params);
   const res = await fetch(`${PERENUAL_API}/${path}?${qs}`, { signal: AbortSignal.timeout(8000) });
-  if (res.status === 429) throw new Error("Daily Perenual lookup limit reached — try again tomorrow.");
+  if (res.status === 429) throw new Error("Too many plant lookups — try again later.");
+  if ([400, 401, 403].includes(res.status)) throw new Error("Online search isn't set up (check the PERENUAL_KEY setting).");
   if (!res.ok) throw new Error("Perenual lookup failed (HTTP " + res.status + ").");
   return res.json();
 }
@@ -519,7 +520,6 @@ function buildFallbackPlant(name) {
 async function fetchCustomPlantData(name) {
   const trimmed = name.trim();
   const fallback = reason => ({ plant: buildFallbackPlant(trimmed), source: "fallback", options: [], reason });
-  if (!PERENUAL_KEY) return fallback("Online search isn't set up (missing Perenual API key).");
   try {
     const { data = [] } = await perenualFetch("species-list", { q: trimmed });
     if (data.length === 0) return fallback(`No results for "${trimmed}" on Perenual.`);
@@ -703,7 +703,7 @@ function Dashboard({ plants, onSelect, onAdd }) {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {plants.map(p => <PlantCard key={p.id} entry={p} onClick={() => onSelect(p.id)} />)}
           </div>
         )}
@@ -812,18 +812,16 @@ function AddPlant({ onSave, onCancel }) {
     setIdentifyError("");
     compressImage(file).then(setPhoto).catch(() => {});
 
-    if (!PLANTNET_KEY) { setStep("select"); return; }
     setStep("identifying");
     try {
       const form = new FormData();
       form.append("images", file);
       form.append("organs", "auto");
-      const res = await fetch(
-        `https://my-api.plantnet.org/v2/identify/all?api-key=${PLANTNET_KEY}&lang=en&nb-results=5`,
-        { method: "POST", body: form }
-      );
+      const res = await fetch("/api/plantnet/identify", { method: "POST", body: form });
       // 404 means Pl@ntNet found no plant in the photo
       if (res.status === 404) throw new Error("No plant detected in photo — pick manually.");
+      if (res.status === 401 || res.status === 403) throw new Error("Plant ID isn't set up (check the PLANTNET_KEY setting) — pick manually.");
+      if (res.status === 429) throw new Error("Too many identifications — wait a minute, or pick manually.");
       if (!res.ok) throw new Error("Couldn't identify — pick manually.");
       const { results = [] } = await res.json();
       const matched = matchPlantNetResults(results);
@@ -949,7 +947,7 @@ function AddPlant({ onSave, onCancel }) {
         className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
         autoFocus
       />
-      <div className="plant-pick-grid max-h-64 overflow-y-auto pb-1">
+      <div className="plant-pick-grid max-h-64 md:max-h-[28rem] overflow-y-auto pb-1">
         {filtered.map(p => (
           <button
             key={p.id}
@@ -1234,7 +1232,7 @@ function PlantProfile({ entry, onUpdate, onDelete, fertilizers, onToast }) {
         ))}
       </div>
 
-      <div className="p-4 space-y-4">
+      <div className={`p-4 ${tab === "log" ? "md:max-w-2xl" : "profile-flow"}`}>
         {tab === "overview" && (
           <>
             {/* Stage progress */}
@@ -1344,8 +1342,8 @@ function PlantProfile({ entry, onUpdate, onDelete, fertilizers, onToast }) {
               Remove plant
             </button>
             {showDeleteConfirm && (
-              <div className="fixed inset-0 bg-black/40 flex items-end z-50" onClick={() => setShowDeleteConfirm(false)}>
-                <div className="bg-white w-full rounded-t-2xl p-5" onClick={e => e.stopPropagation()}>
+              <div className="fixed inset-0 bg-black/40 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={() => setShowDeleteConfirm(false)}>
+                <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl p-5" onClick={e => e.stopPropagation()}>
                   <h3 className="font-bold text-gray-800 mb-2">Remove {entry.nickname}?</h3>
                   <p className="text-sm text-gray-500 mb-4">This will permanently delete all tracking data for this plant.</p>
                   <button onClick={onDelete} className="w-full bg-red-500 text-white py-3 rounded-xl font-semibold mb-2">Remove plant</button>
@@ -1662,9 +1660,9 @@ function ApplyFertModal({ entry, db, fertilizers, onApply, onClose }) {
   const hl = fert ? healthLabel(newHealth) : null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-end z-50" onClick={onClose}>
-      <div className="bg-white w-full rounded-t-2xl modal-sheet flex flex-col" onClick={e => e.stopPropagation()}>
-        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mt-3 mb-2 flex-shrink-0" />
+    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={onClose}>
+      <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl modal-sheet flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto md:hidden mt-3 mb-2 flex-shrink-0" />
         <div className="px-4 pb-2 flex-shrink-0">
           <h3 className="font-bold text-gray-800">Apply Fertilizer to {entry.nickname}</h3>
           <p className="text-xs text-gray-500 mt-0.5">Ideal for {db.name}: {(() => {
@@ -1793,8 +1791,8 @@ function AddFertilizerModal({ onSave, onClose }) {
         throw new Error("Couldn't read barcode — try a clearer, closer photo.");
       }
 
-      // Proxied through our own origin (vite.config.js / nginx.conf) — UPC Item DB doesn't allow browser CORS
-      const res = await fetch(`/api/upc/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`);
+      // Proxied through our own server — UPC Item DB doesn't allow browser CORS
+      const res = await fetch(`/api/upc/lookup?upc=${encodeURIComponent(barcode)}`);
       if (res.status === 429) throw new Error("Barcode lookup limit reached — try again later.");
       const data = await res.json().catch(() => ({}));
       const item = data.items?.[0];
@@ -1835,9 +1833,9 @@ function AddFertilizerModal({ onSave, onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-end z-50" onClick={onClose}>
-      <div className="bg-white w-full rounded-t-2xl modal-sheet" onClick={e => e.stopPropagation()}>
-        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mt-3 mb-1" />
+    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={onClose}>
+      <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto md:hidden mt-3 mb-1" />
         <div className="p-4 space-y-4 pb-8">
           <h2 className="font-bold text-gray-800 text-lg">Add Fertilizer</h2>
 
@@ -1961,7 +1959,7 @@ function NutrientsView({ fertilizers, onAdd, onDelete }) {
   const [deleteId, setDeleteId] = useState(null);
 
   return (
-    <div className="p-4 space-y-4 pb-20">
+    <div className="p-4 space-y-4 pb-20 md:pb-4">
       <div className="flex items-center justify-between">
         <h2 className="font-bold text-gray-800 text-lg">My Fertilizers</h2>
         <button onClick={() => setShowAdd(true)}
@@ -1985,7 +1983,7 @@ function NutrientsView({ fertilizers, onAdd, onDelete }) {
           <button onClick={() => setShowAdd(true)} className="bg-emerald-600 text-white px-5 py-2 rounded-lg font-semibold text-sm">Add Fertilizer</button>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-2">
           {fertilizers.map(f => {
             const total = f.npk.n + f.npk.p + f.npk.k;
             const pN = total > 0 ? f.npk.n/total*100 : 33;
@@ -2035,8 +2033,8 @@ function NutrientsView({ fertilizers, onAdd, onDelete }) {
       )}
 
       {deleteId && (
-        <div className="fixed inset-0 bg-black/40 flex items-end z-50" onClick={() => setDeleteId(null)}>
-          <div className="bg-white w-full rounded-t-2xl p-5" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/40 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={() => setDeleteId(null)}>
+          <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl p-5" onClick={e => e.stopPropagation()}>
             <h3 className="font-bold text-gray-800 mb-2">Delete this fertilizer?</h3>
             <p className="text-sm text-gray-500 mb-4">It will be removed from your library.</p>
             <button onClick={() => { onDelete(deleteId); setDeleteId(null); }} className="w-full bg-red-500 text-white py-3 rounded-xl font-semibold mb-2">Delete</button>
@@ -2225,8 +2223,8 @@ function CreatePlanterModal({ onSave, onClose }) {
   const displayH = unit === "cm" ? height * cellSizeCm : unit === "ft" ? (height * cellSizeCm / 30.48).toFixed(1) : height;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-end z-50" onClick={onClose}>
-      <div className="bg-white w-full rounded-t-2xl p-5 space-y-4 modal-sheet" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={onClose}>
+      <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl p-5 space-y-4 modal-sheet" onClick={e => e.stopPropagation()}>
         <h2 className="font-bold text-gray-800 text-lg">Create Planter Box</h2>
 
         <div>
@@ -2314,9 +2312,9 @@ function CellModal({ box, x, y, onPlant, onRemove, onClose }) {
   })).filter(n => n.plant);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-end z-50" onClick={onClose}>
-      <div className="bg-white w-full rounded-t-2xl modal-sheet flex flex-col" onClick={e => e.stopPropagation()}>
-        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mt-3 mb-1 flex-shrink-0" />
+    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={onClose}>
+      <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl modal-sheet flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto md:hidden mt-3 mb-1 flex-shrink-0" />
 
         {isPlanted ? (
           /* ── Planted cell ── */
@@ -2500,7 +2498,7 @@ function PlanterBoxEditor({ box, onUpdate, onDelete, onBack }) {
   const gridH = box.height * CELL;
 
   return (
-    <div className="pb-20">
+    <div className="pb-20 md:pb-4">
       {/* Banner */}
       <div className="bg-gradient-to-r from-emerald-700 to-teal-600 text-white px-4 pt-3 pb-4">
         <div className="flex items-center gap-2 mb-1 min-w-0">
@@ -2631,8 +2629,8 @@ function PlanterBoxEditor({ box, onUpdate, onDelete, onBack }) {
       )}
 
       {showDeleteConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-end z-50" onClick={() => setShowDeleteConfirm(false)}>
-          <div className="bg-white w-full rounded-t-2xl p-5" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/40 flex items-end md:items-center md:justify-center md:p-6 z-50" onClick={() => setShowDeleteConfirm(false)}>
+          <div className="bg-white w-full rounded-t-2xl md:max-w-lg md:rounded-2xl md:shadow-2xl p-5" onClick={e => e.stopPropagation()}>
             <h3 className="font-bold text-gray-800 mb-2">Delete "{box.name}"?</h3>
             <p className="text-sm text-gray-500 mb-4">All plants in this planter box will be removed.</p>
             <button onClick={onDelete} className="w-full bg-red-500 text-white py-3 rounded-xl font-semibold mb-2">Delete</button>
@@ -2664,7 +2662,7 @@ function PlannerDashboard({ boxes, onSelect, onCreate }) {
           <button onClick={onCreate} className="bg-emerald-600 text-white px-5 py-2 rounded-lg font-semibold text-sm">Create Planter Box</button>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-2">
           {boxes.map(box => {
             const planted = Object.keys(box.cells).length;
             const total = box.width * box.height;
@@ -2743,10 +2741,24 @@ function RippleBtn({ children, className = "", onClick, disabled, style, type })
   );
 }
 
+// Tablet/desktop: tabs inline in the header
+function HeaderNav({ tab, onTabChange }) {
+  return (
+    <nav className="hidden md:flex items-center gap-1 flex-1 ml-4">
+      {NAV_TABS.map(t => (
+        <button key={t.id} onClick={() => onTabChange(t.id)}
+          className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${tab === t.id ? "bg-white/25 text-white" : "text-white/75 hover:bg-white/10 hover:text-white"}`}>
+          <span className="mr-1.5">{t.icon}</span>{t.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function ToastStack({ toasts }) {
   return (
-    <div className="fixed bottom-20 left-0 right-0 max-w-lg mx-auto px-4 z-[90] pointer-events-none space-y-2">
+    <div className="fixed bottom-20 md:bottom-6 left-0 right-0 max-w-lg mx-auto px-4 z-[90] pointer-events-none space-y-2">
       {toasts.map(t => (
         <div
           key={t.id}
@@ -2854,14 +2866,17 @@ function Confetti({ active, onDone }) {
 
 
 // ── Bottom Tab Bar ────────────────────────────────────────────────────────────
+const NAV_TABS = [
+  { id: "garden",    label: "My Garden", icon: "🌱" },
+  { id: "planner",   label: "Planner",   icon: "📐" },
+  { id: "nutrients", label: "Nutrients", icon: "🧪" },
+];
+
+// Phones: fixed bottom tab bar
 function BottomNav({ tab, onTabChange }) {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-white border-t border-gray-200 flex z-40">
-      {[
-        { id: "garden",    label: "My Garden", icon: "🌱" },
-        { id: "planner",   label: "Planner",   icon: "📐" },
-        { id: "nutrients", label: "Nutrients",  icon: "🧪" },
-      ].map(t => (
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-white border-t border-gray-200 flex z-40">
+      {NAV_TABS.map(t => (
         <button key={t.id} onClick={() => onTabChange(t.id)}
           className={`relative flex-1 py-2.5 flex flex-col items-center gap-0.5 font-semibold transition-colors ${tab === t.id ? "text-green-700" : "text-gray-400 hover:text-gray-600"}`}>
           <span className="text-xl leading-none">{t.icon}</span>
@@ -3007,16 +3022,17 @@ export default function App() {
   const showNewBoxBtn = tab === "planner" && plannerView === "list";
 
   return (
-    <div className="min-h-screen bg-gray-50 max-w-lg mx-auto flex flex-col">
+    <div className="min-h-screen bg-gray-50 w-full max-w-lg md:max-w-5xl mx-auto flex flex-col md:shadow-sm">
       {/* Header */}
       <header className="bg-gradient-to-r from-green-700 to-emerald-600 text-white px-4 py-3 flex items-center gap-3 shadow-md">
         {showBack && (
           <button onClick={handleBack} className="text-white/80 hover:text-white text-xl leading-none">←</button>
         )}
         <span className="text-2xl">🌱</span>
-        <h1 className="font-bold text-lg flex-1 min-w-0 truncate">
+        <h1 className="font-bold text-lg flex-1 md:flex-none min-w-0 truncate">
           {tab === "planner" && plannerView === "box" && selectedBox ? selectedBox.name : "Garden Tracker"}
         </h1>
+        <HeaderNav tab={tab} onTabChange={setTab} />
         {showAddBtn && (
           <RippleBtn onClick={() => setView("add")}
             className="bg-white/20 hover:bg-white/30 text-white text-sm font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1">
@@ -3042,14 +3058,16 @@ export default function App() {
       </header>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto pb-16">
+      <main className="flex-1 overflow-y-auto pb-16 md:pb-6">
         {tab === "garden" && (
           <>
             {view === "dashboard" && (
               <Dashboard plants={plants} onSelect={id => { setSelectedId(id); setView("profile"); }} onAdd={() => setView("add")} />
             )}
             {view === "add" && (
-              <AddPlant onSave={addPlant} onCancel={() => setView("dashboard")} />
+              <div className="md:max-w-2xl md:mx-auto">
+                <AddPlant onSave={addPlant} onCancel={() => setView("dashboard")} />
+              </div>
             )}
             {view === "profile" && selected && (
               <PlantProfile
