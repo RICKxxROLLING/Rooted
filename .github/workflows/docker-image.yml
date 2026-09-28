@@ -30,4 +30,6 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            VITE_PLANTNET_KEY=${{ secrets.PLANTNET_KEY }}
           tags: ghcr.io/${{ env.OWNER }}/garden-tracker:latest

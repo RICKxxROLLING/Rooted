@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from "react";
-import { BrowserMultiFormatReader } from "@zxing/browser";
 
 // ── Plant database (250 plants) ─────────────────────────────────────────────
 // `let` so custom-lookup plants can be registered at runtime
@@ -212,7 +211,76 @@ let PLANT_DB = {
   },
 };
 
-const PLANT_LIST = Object.entries(PLANT_DB).map(([id, p]) => ({ id, ...p }));
+// ── Custom plants (from online lookup) persist separately so saved garden
+// entries that reference them still resolve after a reload.
+const CUSTOM_PLANTS_KEY = "gt-customplants";
+try { Object.assign(PLANT_DB, JSON.parse(localStorage.getItem(CUSTOM_PLANTS_KEY) || "{}")); } catch {}
+
+function registerCustomPlant(key, plant) {
+  PLANT_DB[key] = plant;
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_PLANTS_KEY) || "{}");
+    saved[key] = plant;
+    localStorage.setItem(CUSTOM_PLANTS_KEY, JSON.stringify(saved));
+  } catch (err) { console.warn("Could not save custom plant", err); }
+}
+
+function loadJSON(key, fallback) {
+  try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : fallback; }
+  catch { return fallback; }
+}
+
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch (err) { console.warn(`Could not save ${key} (storage full?)`, err); }
+}
+
+// Downscale camera photos before storing — full-size data URLs are several MB
+// each and quickly exhaust the ~5 MB localStorage quota.
+function compressImage(file, maxDim = 800, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Unreadable image")); };
+    img.src = url;
+  });
+}
+
+// ── Pl@ntNet identification ──────────────────────────────────────────────────
+const PLANTNET_KEY = import.meta.env.VITE_PLANTNET_KEY;
+const PLANTNET_MIN_SCORE = 0.15;
+
+const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Map Pl@ntNet results (sorted by score) to a PLANT_DB id using whole-word
+// name matches, so e.g. "Peppermint" doesn't match "Pepper".
+function matchPlantNetResults(results) {
+  // Longest names first so "Bell Pepper" wins over "Pepper"
+  const entries = Object.entries(PLANT_DB).sort((a, b) => b[1].name.length - a[1].name.length);
+  for (const r of results) {
+    if ((r.score ?? 0) < PLANTNET_MIN_SCORE) break;
+    const names = [...(r.species?.commonNames || []), r.species?.scientificNameWithoutAuthor || ""]
+      .map(n => n.toLowerCase().trim()).filter(Boolean);
+    const exact = entries.find(([, p]) => names.includes(p.name.toLowerCase()));
+    if (exact) return exact[0];
+    const partial = entries.find(([, p]) => {
+      const re = new RegExp(`\\b${escapeRegExp(p.name.toLowerCase())}(e?s)?\\b`);
+      return names.some(n => re.test(n));
+    });
+    if (partial) return partial[0];
+  }
+  return null;
+}
+
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function daysBetween(a, b) {
@@ -705,6 +773,7 @@ function AddPlant({ onSave, onCancel }) {
   const [lookupResult, setLookupResult] = useState(null); // { plant, source, options }
   const [lookupOptions, setLookupOptions] = useState([]);
   const [lookupError, setLookupError] = useState("");
+  const [identifyError, setIdentifyError] = useState("");
   const fileRef = useRef();
 
   const allPlants = Object.entries(PLANT_DB).map(([id, p]) => ({ id, ...p }));
@@ -714,56 +783,40 @@ function AddPlant({ onSave, onCancel }) {
   );
   const noResults = search.trim().length > 1 && filtered.length === 0;
 
-  const [identifyError, setIdentifyError] = useState("");
-
   async function handlePhoto(e) {
     const file = e.target.files[0];
+    e.target.value = ""; // allow re-selecting the same file
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => setPhoto(ev.target.result);
-    reader.readAsDataURL(file);
-
-    setStep("identifying");
     setIdentifyError("");
+    compressImage(file).then(setPhoto).catch(() => {});
+
+    if (!PLANTNET_KEY) { setStep("select"); return; }
+    setStep("identifying");
     try {
       const form = new FormData();
       form.append("images", file);
       form.append("organs", "auto");
       const res = await fetch(
-        "https://my-api.plantnet.org/v2/identify/all?api-key=2b10qqEpq1xFkdppuyb37UybO&lang=en&nb-results=5",
+        `https://my-api.plantnet.org/v2/identify/all?api-key=${PLANTNET_KEY}&lang=en&nb-results=5`,
         { method: "POST", body: form }
       );
-      if (!res.ok) throw new Error("API error");
-      const data = await res.json();
-      const results = data.results || [];
-      // Try to match top candidates against PLANT_DB by common or scientific name
-      let matched = null;
-      for (const r of results) {
-        const commonNames = (r.species?.commonNames || []).map(n => n.toLowerCase());
-        const sciName = (r.species?.scientificNameWithoutAuthor || "").toLowerCase();
-        const allNames = [sciName, ...commonNames];
-        for (const [id, p] of Object.entries(PLANT_DB)) {
-          const dbName = p.name.toLowerCase();
-          if (allNames.some(n => n.includes(dbName) || dbName.includes(n.split(" ")[0]))) {
-            matched = id;
-            break;
-          }
-        }
-        if (matched) break;
-      }
+      // 404 means Pl@ntNet found no plant in the photo
+      if (res.status === 404) throw new Error("No plant detected in photo — pick manually.");
+      if (!res.ok) throw new Error("Couldn't identify — pick manually.");
+      const { results = [] } = await res.json();
+      const matched = matchPlantNetResults(results);
       if (matched) {
         setSelectedId(matched);
         setNickname(PLANT_DB[matched].name);
         setStep("details");
       } else {
         // Pre-fill search with top common name so user can pick manually
-        const topCommon = results[0]?.species?.commonNames?.[0] ||
-          results[0]?.species?.scientificNameWithoutAuthor || "";
-        setSearch(topCommon);
+        const top = results[0]?.species;
+        setSearch(top?.commonNames?.[0] || top?.scientificNameWithoutAuthor || "");
         setStep("select");
       }
-    } catch {
-      setIdentifyError("Couldn't identify — pick manually.");
+    } catch (err) {
+      setIdentifyError(err instanceof TypeError ? "Couldn't reach Pl@ntNet — pick manually." : err.message);
       setStep("select");
     }
   }
@@ -796,7 +849,7 @@ function AddPlant({ onSave, onCancel }) {
   function confirmCustomPlant() {
     if (!lookupResult) return;
     const key = lookupResult.plant.name.toLowerCase().replace(/\s+/g, "_") + "_" + randomId();
-    PLANT_DB[key] = lookupResult.plant;
+    registerCustomPlant(key, lookupResult.plant);
     setSelectedId(key);
     setStep("details");
   }
@@ -1694,50 +1747,60 @@ function AddFertilizerModal({ onSave, onClose }) {
 
   function handlePhoto(e) {
     const file = e.target.files[0];
+    e.target.value = "";
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => setPhoto(ev.target.result);
-    reader.readAsDataURL(file);
+    compressImage(file).then(setPhoto).catch(() => {});
   }
 
   async function handleBarcode(e) {
     const file = e.target.files[0];
+    e.target.value = ""; // allow re-scanning the same file
     if (!file) return;
     setScanning(true);
     setScanError("");
+    const imgUrl = URL.createObjectURL(file);
     try {
-      const imgUrl = URL.createObjectURL(file);
-      const reader = new BrowserMultiFormatReader();
-      const result = await reader.decodeFromImageUrl(imgUrl);
-      URL.revokeObjectURL(imgUrl);
-      const barcode = result.getText();
+      let barcode;
+      try {
+        // Lazy-load ZXing so it isn't in the main bundle
+        const { BrowserMultiFormatReader } = await import("@zxing/browser");
+        barcode = (await new BrowserMultiFormatReader().decodeFromImageUrl(imgUrl)).getText();
+      } catch {
+        throw new Error("Couldn't read barcode — try a clearer, closer photo.");
+      }
 
-      const res = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${barcode}`);
-      const data = await res.json();
+      // Proxied through our own origin (vite.config.js / nginx.conf) — UPC Item DB doesn't allow browser CORS
+      const res = await fetch(`/api/upc/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`);
+      if (res.status === 429) throw new Error("Barcode lookup limit reached — try again later.");
+      const data = await res.json().catch(() => ({}));
       const item = data.items?.[0];
-      if (!item) throw new Error("Product not found");
+      if (!item) throw new Error(`Product ${barcode} not found — enter details manually.`);
 
       if (item.title) setName(item.title);
       if (item.brand) setBrand(item.brand);
 
-      // Try to parse NPK from title or description (e.g. "10-10-10", "5-10-5")
-      const searchText = `${item.title || ""} ${item.description || ""}`;
-      const npkMatch = searchText.match(/(\d{1,2})-(\d{1,2})-(\d{1,2})/);
-      if (npkMatch) {
-        setN(Number(npkMatch[1]));
-        setP(Number(npkMatch[2]));
-        setK(Number(npkMatch[3]));
+      // Parse NPK from title/description (e.g. "10-10-10", "4-12-4", "0.5-1-1")
+      const text = `${item.title || ""} ${item.description || ""}`;
+      const npk = text.match(/(?<![\d.-])(\d{1,2}(?:\.\d+)?)\s*-\s*(\d{1,2}(?:\.\d+)?)\s*-\s*(\d{1,2}(?:\.\d+)?)(?![\d.-])/);
+      if (npk) {
+        const clamp = v => Math.min(50, Math.round(Number(v)));
+        setN(clamp(npk[1])); setP(clamp(npk[2])); setK(clamp(npk[3]));
       }
 
-      // Guess type from title
-      const titleLower = (item.title || "").toLowerCase();
-      if (titleLower.includes("granul") || titleLower.includes("spike") || titleLower.includes("powder")) setType("Granular");
-      else if (titleLower.includes("liquid") || titleLower.includes("concentrate")) setType("Liquid");
-      else if (titleLower.includes("organic") || titleLower.includes("compost")) setType("Organic");
-
+      const t = text.toLowerCase();
+      const guessed =
+        /spike/.test(t) ? "Spike" :
+        /slow.?release|controlled.?release/.test(t) ? "Slow-release" :
+        /granul|pellet/.test(t) ? "Granular" :
+        /powder|soluble/.test(t) ? "Powder" :
+        /liquid|concentrate/.test(t) ? "Liquid" :
+        /organic|compost|manure|fish|kelp|bone meal/.test(t) ? "Organic" : null;
+      if (guessed) setType(guessed);
+      if (!npk) setScanError("Found the product, but no NPK on record — check the label.");
     } catch (err) {
-      setScanError(err.message === "Product not found" ? "Product not found in database." : "Couldn't read barcode — try a clearer photo.");
+      setScanError(err instanceof TypeError ? "Couldn't reach barcode lookup service." : err.message);
     } finally {
+      URL.revokeObjectURL(imgUrl);
       setScanning(false);
     }
   }
@@ -2976,18 +3039,15 @@ function BottomNav({ tab, onTabChange }) {
 export default function App() {
   // ── Persistent state — load from localStorage, fall back to defaults ──────
   const [plants, setPlants] = useState(() => {
-    try { const s = localStorage.getItem("gt-plants"); return s ? JSON.parse(s) : INITIAL; }
-    catch { return INITIAL; }
+    const loaded = loadJSON("gt-plants", INITIAL);
+    // Never crash on an entry whose plant type is missing (e.g. a custom plant
+    // saved before custom plants were persisted) — give it generic defaults.
+    loaded.forEach(p => { if (!PLANT_DB[p.plantId]) registerCustomPlant(p.plantId, buildFallbackPlant(p.nickname || "Plant")); });
+    return loaded;
   });
-  const [fertilizers, setFertilizers] = useState(() => {
-    try { const s = localStorage.getItem("gt-fertilizers"); return s ? JSON.parse(s) : []; }
-    catch { return []; }
-  });
+  const [fertilizers, setFertilizers] = useState(() => loadJSON("gt-fertilizers", []));
   const [tab, setTab] = useState("garden");
-  const [darkMode, setDarkMode] = useState(() => {
-    try { return localStorage.getItem("gt-darkmode") === "true"; }
-    catch { return false; }
-  });
+  const [darkMode, setDarkMode] = useState(() => loadJSON("gt-darkmode", false) === true);
 
   // Apply dark attribute to <html> so every element on the page is covered,
   // including fixed-position modals that escape any child container.
@@ -3001,10 +3061,7 @@ export default function App() {
   // Animation state
   const [toasts, setToasts]           = useState([]);
   const [confettiOn, setConfettiOn]   = useState(false);
-  const [celebrated, setCelebrated]   = useState(() => {
-    try { const s = localStorage.getItem("gt-celebrated"); return s ? new Set(JSON.parse(s)) : new Set(); }
-    catch { return new Set(); }
-  });
+  const [celebrated, setCelebrated]   = useState(() => new Set(loadJSON("gt-celebrated", [])));
   const toastTimers = useRef({});
 
   function pushToast(message, icon = "✅", type = "success", duration = 2800) {
@@ -3033,20 +3090,17 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
 
   // Planner state
-  const [planterBoxes, setPlanterBoxes] = useState(() => {
-    try { const s = localStorage.getItem("gt-planterboxes"); return s ? JSON.parse(s) : []; }
-    catch { return []; }
-  });
+  const [planterBoxes, setPlanterBoxes] = useState(() => loadJSON("gt-planterboxes", []));
   const [selectedBoxId, setSelectedBoxId] = useState(null);
   const [showCreatePlanter, setShowCreatePlanter] = useState(false);
   const [plannerView, setPlannerView] = useState("list"); // list | box
 
   // ── Persist all user data to localStorage on every change ─────────────────
-  useEffect(() => { try { localStorage.setItem("gt-plants",      JSON.stringify(plants));      } catch {} }, [plants]);
-  useEffect(() => { try { localStorage.setItem("gt-fertilizers", JSON.stringify(fertilizers)); } catch {} }, [fertilizers]);
-  useEffect(() => { try { localStorage.setItem("gt-planterboxes",JSON.stringify(planterBoxes));} catch {} }, [planterBoxes]);
-  useEffect(() => { try { localStorage.setItem("gt-darkmode",    String(darkMode));             } catch {} }, [darkMode]);
-  useEffect(() => { try { localStorage.setItem("gt-celebrated",  JSON.stringify([...celebrated])); } catch {} }, [celebrated]);
+  useEffect(() => saveJSON("gt-plants",       plants),          [plants]);
+  useEffect(() => saveJSON("gt-fertilizers",  fertilizers),     [fertilizers]);
+  useEffect(() => saveJSON("gt-planterboxes", planterBoxes),    [planterBoxes]);
+  useEffect(() => saveJSON("gt-darkmode",     darkMode),        [darkMode]);
+  useEffect(() => saveJSON("gt-celebrated",   [...celebrated]), [celebrated]);
 
   // ── Auto-watering engine: runs on mount + whenever plants change ──────────
   useEffect(() => {

@@ -4,10 +4,13 @@ WORKDIR /app
 
 # Install dependencies first (cached layer)
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 # Copy source and build
 COPY . .
+# Pl@ntNet key is baked into the client bundle at build time
+ARG VITE_PLANTNET_KEY
+ENV VITE_PLANTNET_KEY=$VITE_PLANTNET_KEY
 RUN npm run build
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
