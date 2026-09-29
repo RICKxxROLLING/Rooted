@@ -307,13 +307,21 @@ function MiniBedPicker({ bed, size, value, onChange }) {
   );
 }
 
+/** Number fields keep the raw text while typing (so the box can be cleared and
+ *  retyped); the clamped value is derived, and the box is tidied on blur. */
+const clampNum = (text, min, max) => {
+  const n = Math.round(Number(text));
+  return Number.isFinite(n) && String(text).trim() !== "" ? Math.max(min, Math.min(max, n)) : min;
+};
+
 /* ───────────── New bed ───────────── */
 export function NewBedSheet({ onClose, onCreated }) {
   const { beds, addBed } = useGarden();
   const [name, setName] = useState(`Bed ${beds.length + 1}`);
-  const [width, setWidth] = useState(8);
-  const [height, setHeight] = useState(4);
-  const clamp = (v, max) => Math.max(1, Math.min(max, Math.round(Number(v) || 1)));
+  const [widthText, setWidthText] = useState("8");
+  const [heightText, setHeightText] = useState("4");
+  const width = clampNum(widthText, 1, 12);
+  const height = clampNum(heightText, 1, 8);
   function create() {
     const bed = addBed({ name: name.trim() || `Bed ${beds.length + 1}`, width, height });
     onCreated?.(bed);
@@ -323,8 +331,10 @@ export function NewBedSheet({ onClose, onCreated }) {
       <div className="flex flex-col gap-5">
         <TextField label="Name" value={name} onChange={e => setName(e.target.value)} />
         <div className="grid grid-cols-2 gap-3">
-          <TextField label="Length" type="number" min={1} max={12} mono unit="ft" value={width} onChange={e => setWidth(clamp(e.target.value, 12))} />
-          <TextField label="Width" type="number" min={1} max={8} mono unit="ft" value={height} onChange={e => setHeight(clamp(e.target.value, 8))} />
+          <TextField label="Length" type="number" inputMode="numeric" min={1} max={12} mono unit="ft" hint="1–12 ft"
+            value={widthText} onChange={e => setWidthText(e.target.value)} onBlur={() => setWidthText(String(width))} />
+          <TextField label="Width" type="number" inputMode="numeric" min={1} max={8} mono unit="ft" hint="1–8 ft"
+            value={heightText} onChange={e => setHeightText(e.target.value)} onBlur={() => setHeightText(String(height))} />
         </div>
         <p className="text-caption text-muted">Each square is 1 sq ft. <Mono value={width * height} unit="sq ft" /> in total.</p>
       </div>
@@ -338,7 +348,8 @@ export function AddProductSheet({ onClose }) {
   const [name, setName] = useState("");
   const [brand, setBrand] = useState("");
   const [type, setType] = useState("Liquid");
-  const [npk, setNpk] = useState({ n: 10, p: 10, k: 10 });
+  const [npkText, setNpkText] = useState({ n: "10", p: "10", k: "10" });
+  const npk = { n: clampNum(npkText.n, 0, 50), p: clampNum(npkText.p, 0, 50), k: clampNum(npkText.k, 0, 50) };
   const [notes, setNotes] = useState("");
   const [scan, setScan] = useState({ busy: false, msg: "" });
 
@@ -366,7 +377,7 @@ export function AddProductSheet({ onClose }) {
       const m = text.match(/(?<![\d.-])(\d{1,2}(?:\.\d+)?)\s*-\s*(\d{1,2}(?:\.\d+)?)\s*-\s*(\d{1,2}(?:\.\d+)?)(?![\d.-])/);
       if (m) {
         const c = v => Math.min(50, Math.round(Number(v)));
-        setNpk({ n: c(m[1]), p: c(m[2]), k: c(m[3]) });
+        setNpkText({ n: String(c(m[1])), p: String(c(m[2])), k: String(c(m[3])) });
       }
       const t = text.toLowerCase();
       const guessed = /spike/.test(t) ? "Spike" : /slow.?release|controlled.?release/.test(t) ? "Slow-release"
@@ -381,7 +392,11 @@ export function AddProductSheet({ onClose }) {
     }
   }
 
-  const setPart = k => e => setNpk(v => ({ ...v, [k]: Math.max(0, Math.min(50, Math.round(Number(e.target.value) || 0))) }));
+  const npkProps = k => ({
+    value: npkText[k],
+    onChange: e => setNpkText(v => ({ ...v, [k]: e.target.value })),
+    onBlur: () => setNpkText(v => ({ ...v, [k]: String(npk[k]) })),
+  });
   const valid = name.trim() && npk.n + npk.p + npk.k > 0;
   function save() {
     addFertilizer({ name: name.trim(), brand: brand.trim(), type, npk, notes });
@@ -408,9 +423,9 @@ export function AddProductSheet({ onClose }) {
         </div>
         <div className="flex flex-col gap-3">
           <div className="grid grid-cols-3 gap-3">
-            <TextField label="N" type="number" inputMode="numeric" min={0} max={50} mono value={npk.n} onChange={setPart("n")} />
-            <TextField label="P" type="number" inputMode="numeric" min={0} max={50} mono value={npk.p} onChange={setPart("p")} />
-            <TextField label="K" type="number" inputMode="numeric" min={0} max={50} mono value={npk.k} onChange={setPart("k")} />
+            <TextField label="N" type="number" inputMode="numeric" min={0} max={50} mono {...npkProps("n")} />
+            <TextField label="P" type="number" inputMode="numeric" min={0} max={50} mono {...npkProps("p")} />
+            <TextField label="K" type="number" inputMode="numeric" min={0} max={50} mono {...npkProps("k")} />
           </div>
           <NpkBar npk={npk} />
         </div>
