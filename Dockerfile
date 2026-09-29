@@ -12,7 +12,7 @@ RUN npm run build
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
 FROM nginx:alpine
-LABEL org.opencontainers.image.title="Garden Tracker" \
+LABEL org.opencontainers.image.title="Rooted" \
       org.opencontainers.image.description="Track, water and plan your garden" \
       org.opencontainers.image.source="https://github.com/RICKxxROLLING/Rooted" \
       org.opencontainers.image.licenses="AGPL-3.0" \
